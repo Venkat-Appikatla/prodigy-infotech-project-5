@@ -1,0 +1,141 @@
+!pip install tensorflow numpy pandas Flask
+
+
+import tensorflow as tf
+from tensorflow.keras.applications import EfficientNetB0
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Dense, GlobalAveragePooling2D
+from tensorflow.keras.preprocessing.image import ImageDataGenerator, load_img, img_to_array
+import pandas as pd
+import numpy as np
+from flask import Flask, request, jsonify
+import os
+
+
+
+# Path to your dataset
+dataset_path = 'path/to/food_images'  # Update this path
+
+# Image data generator for training and validation
+train_datagen = ImageDataGenerator(
+    rescale=1./255,  # Rescale pixel values
+    validation_split=0.2,  # Split data into training and validation sets
+    horizontal_flip=True,
+    zoom_range=0.2,
+    shear_range=0.2
+)
+
+train_generator = train_datagen.flow_from_directory(
+    dataset_path,
+    target_size=(224, 224),
+    batch_size=32,
+    class_mode='categorical',
+    subset='training'
+)
+
+validation_generator = train_datagen.flow_from_directory(
+    dataset_path,
+    target_size=(224, 224),
+    batch_size=32,
+    class_mode='categorical',
+    subset='validation'
+)
+
+
+
+# Load pre-trained EfficientNetB0 model
+base_model = EfficientNetB0(weights='imagenet', include_top=False, input_shape=(224, 224, 3))
+
+# Add custom layers
+x = base_model.output
+x = GlobalAveragePooling2D()(x)
+x = Dense(1024, activation='relu')(x)
+predictions = Dense(train_generator.num_classes, activation='softmax')(x)  # Adjust output layer to match number of food categories
+
+# Create the model
+model = Model(inputs=base_model.input, outputs=predictions)
+
+# Freeze the base model layers
+for layer in base_model.layers:
+    layer.trainable = False
+
+# Compile the model
+model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+
+# Train the model
+history = model.fit(
+    train_generator,
+    epochs=10,
+    validation_data=validation_generator
+)
+
+
+# Load nutritional information
+nutritional_info = pd.read_csv('path/to/food_calories.csv')  # Update this path
+nutritional_info.set_index('food_item', inplace=True)
+
+def estimate_calories(food_item):
+    try:
+        calories = nutritional_info.loc[food_item, 'calories']
+        return calories
+    except KeyError:
+        return "Calorie information not available"
+
+# Example usage
+food_item = 'apple'
+print(f"Calories for {food_item}: {estimate_calories(food_item)}")
+
+
+
+def predict_and_estimate_calories(img_path):
+    # Load and preprocess the image
+    img = load_img(img_path, target_size=(224, 224))
+    img_array = img_to_array(img)
+    img_array = np.expand_dims(img_array, axis=0)
+    img_array = img_array / 255.0
+
+    # Predict the food item
+    predictions = model.predict(img_array)
+    predicted_class = np.argmax(predictions, axis=1)
+    food_item = list(train_generator.class_indices.keys())[predicted_class[0]]
+
+    # Estimate calories
+    calories = estimate_calories(food_item)
+
+    return food_item, calories
+
+# Example usage
+img_path = 'path/to/test_image.jpg'  # Update this path
+food_item, calories = predict_and_estimate_calories(img_path)
+print(f"Predicted food item: {food_item}")
+print(f"Estimated calories: {calories}")
+
+
+
+
+app = Flask(__name__)
+
+@app.route('/predict', methods=['POST'])
+def predict():
+    if 'file' not in request.files:
+        return jsonify({"error": "No file provided"}), 400
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({"error": "No file selected"}), 400
+
+    # Save the file to a temporary location
+    temp_img_path = os.path.join("path/to/save", file.filename)  # Update this path
+    file.save(temp_img_path)
+
+    # Predict and estimate calories
+    food_item, calories = predict_and_estimate_calories(temp_img_path)
+
+    # Remove the temporary file
+    os.remove(temp_img_path)
+
+    return jsonify({"food_item": food_item, "calories": calories})
+
+if __name__ == '__main__':
+    app.run(debug=True)
+
+
